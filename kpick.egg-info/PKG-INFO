@@ -1,0 +1,219 @@
+Metadata-Version: 2.1
+Name: kpick
+Version: 1.0.0
+Summary: An AI picking package
+Home-page: https://github.com/mtbui2010
+Author: Trung M. Bui
+Author-email: bmtrungvp@gmail.com
+License: MIT
+Description: # AI Picking package
+        ## Install 
+        ```sh
+        cd $ROOT
+        pip install -e .
+        ```
+        ## Download pretrained network and cofigurations file
+        https://drive.google.com/drive/folders/1hdeJUe0EzIO6be5i-m8ygYpbnDGpHrKy?usp=sharing
+        ** Place *.cfg files into $ROOT/configs, and trained *.pth to $ROOT/data/model/{grip or suction}_evaluator
+        ## Demos
+        ### Suction Detection with RGBD from realsense
+        ```sh
+        from kpick.processing.suction_detection_v2 import SuctionDetector
+        import pyrealsense2 as rs
+        import numpy as np
+        import cv2
+        
+        class RSSensor():
+            def get_device_sn(self):
+                realsense_ctx = rs.context()
+                for i in range(len(realsense_ctx.devices)):
+                    detected_camera = realsense_ctx.devices[i].get_info(rs.camera_info.serial_number)
+                    print(detected_camera)
+        
+            def start(self, device_serial=None):
+                if device_serial is not None:
+                    self.start_(device_serial=device_serial)
+                else:
+                    realsense_ctx = rs.context()
+                    for i in range(len(realsense_ctx.devices)):
+                        detected_serial = realsense_ctx.devices[i].get_info(rs.camera_info.serial_number)
+                        try:
+                            self.start_(device_serial=detected_serial)
+                            break
+                        except:
+                            pass
+        
+            def start_(self, device_serial, im_size=(1280, 720)):
+                # >>>>>>>>> Configs for REALSENSE CAMERA
+                self.pipeline = rs.pipeline()
+                config = rs.config()
+                config.enable_device(device_serial)
+                config.enable_stream(rs.stream.depth, 848, 480, rs.format.z16, 15)
+                config.enable_stream(rs.stream.color, im_size[0], im_size[1], rs.format.bgr8, 15)
+        
+                self.align = rs.align(rs.stream.color)
+                self.pipeline.start(config)
+                print('sensor {} initialized ... '.format(device_serial))
+        
+            def stop(self):
+                self.pipeline.stop()
+                print('sensor terminated ... ')
+        
+            def get_data(self):
+                frames = self.pipeline.wait_for_frames()
+                aligned_frames = self.align.process(frames)
+        
+                color_frame = aligned_frames.get_color_frame()  # bgr
+                rgb = np.asanyarray(color_frame.get_data())[:,:,::-1]
+        
+                depth_frame = aligned_frames.get_depth_frame()
+                depth = np.asanyarray(depth_frame.get_data())
+        
+                return rgb, depth
+        
+        
+        # get data from realsene
+        sensor = RSSensor()
+        sensor.start()
+        for i in range(5): rgb, depth = sensor.get_data()
+        
+        
+        # define detector
+        detector = SuctionDetector(cfg_path='configs/suction_net.cfg')
+        
+        # set crop area
+        bbox = (630, 330, 1000, 670)    # left, top, right, bottom
+        
+        # find suction  pose
+        Suctions = detector.find_suction_pose_rgb_depth(rgb=rgb, depth=depth, bbox=bbox)
+        out = detector.show_suctions_rgbd_depth(rgb, depth, Suctions,  bbox=bbox)
+        
+        # show
+        cv2.imshow('rgb', rgb[:, :, ::-1])
+        cv2.imshow('depth', depth)
+        cv2.imshow('out', out[:,:,::-1])
+        
+        # release realsense
+        cv2.waitKey()
+        sensor.stop()
+        ```
+        ### Suction Detection with GUI
+        #### Dependencies
+        ```sh
+        sudo apt install python3-tk
+        ```
+        ```sh
+        from  ttcv.basic.basic_objects import DetGui
+        from kpick.processing.suction_detection_v2 import SuctionDetector
+        class SuctionGuiDetector(SuctionDetector, DetGui):
+            def gui_process_single(self, rgbd, method_ind=0, filename='unnamed', disp_mode='rgb'):
+                if method_ind == 0: ret = self.show_suctions(
+                    rgbd=rgbd, Suctions=self.find_suction_pose_multiscale(rgbd=rgbd), disp_mode=disp_mode)
+                return ret
+        
+        from ttcv.sensor.realsense_sensor import get_realsense_modules
+        from ttcv.basic.basic_gui import BasGUI, GuiModule
+        
+        cfg_path = 'configs/suction_net.cfg'
+        suction_detect_module = GuiModule(SuctionGuiDetector, type='suction_detector', name='Suction Detector',
+                                          category='detector', cfg_path=cfg_path, num_mod_method=1)
+        
+        BasGUI(title='Stefan Pose Maker',
+               modules=[suction_detect_module] + get_realsense_modules(),
+               )
+        ```
+        
+        ### Suction Detection With TCP/IP connect
+        #### Server
+        ```sh
+        from ttcv.basic.basic_tcp_connect import ServerThread
+        from kpick.processing.suction_detection_v2 import SuctionDetector
+        
+        
+        class SuctionSeverDetector(SuctionDetector, ServerThread):
+            def __init__(self, cfg_path, host='localhost', port=8888):
+                SuctionDetector.__init__(self,cfg_path=cfg_path)
+                print('{} Detector initialized '.format('+'*10))
+                ServerThread.__init__(self,host=host, port=port)
+                print('{} Server initialized '.format('+' * 10))
+        
+            def process_received_data(self):
+                Suctions = self.find_suction_pose_rgb_depth(rgb=self.data['rgb'], depth=self.data['depth'],
+                                                            bbox=self.data['bbox'], ws_pts=self.data['ws_pts'])
+        
+                det = {'scores': Suctions.scores.tolist(), 'locs': Suctions.get_suction_centers(),
+                       'disp_color': Suctions.disp_colors, 'norms': Suctions.norm_vectors()}
+                out =  self.show_suctions_rgb_depth(rgb=self.data['rgb'], depth=self.data['depth'],
+                                                    Suctions=Suctions, bbox=self.data['bbox'],
+                                                    ws_pts=self.data['ws_pts'],  disp_mode=self.data['disp_mode'])
+                return {'im':out, 'det': det}
+        
+        
+        if __name__=='__main__':
+            SuctionSeverDetector(cfg_path='configs/suction_net.cfg', host='10.252.101.81').listen()
+        ```
+        #### Client
+        ```sh
+        from ttcv.basic.basic_objects import  DetGuiObj
+        from ttcv.basic.basic_tcp_connect import ClientThread
+        from ttcv.utils.proc_utils import CFG
+        from ttcv.basic.basic_gui import BasGUI, GuiModule
+        from ttcv.sensor.realsense_sensor import get_realsense_modules
+        
+        
+        def demo_client_gui(host='localhost',port=8888):
+            class ClientGui(DetGuiObj, ClientThread):
+                def __init__(self, args=None, cfg_path=None):
+                    DetGuiObj.__init__(self, args=args, cfg_path=cfg_path)
+                    ClientThread.__init__(self, host=self.args.host, port=self.args.port)
+        
+                def gui_process_single(self, rgbd, method_ind=0, filename='unnamed', disp_mode='rgb'):
+        
+                    rets =  self.send_and_get_return({'rgb': rgbd.rgb, 'depth': rgbd.depth,
+                               'bbox': rgbd.workspace.bbox, 'ws_pts': rgbd.workspace.pts, 'disp_mode': disp_mode})
+                    print('Return received ...')
+        
+                    if rets is None:
+                        print('None return ...')
+                        return rgbd.disp(mode=disp_mode)
+        
+                    #++++++++++++++++++++++++++++ Robot actiont here
+                    det = rets['det']
+                    return rets['im']
+        
+        
+        
+            args = CFG()
+            args.host, args.port = host, port
+            client_module = GuiModule(ClientGui, type='client_gui', name='Client GUI', category='detector',
+                                      run_thread=True, args=args)
+            BasGUI(title='Client Gui', modules=[client_module,]+get_realsense_modules())
+        
+        if __name__=='__main__':
+            demo_client_gui()
+        ```
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+Keywords: AI,VISION,GRASP DETECTION
+Platform: UNKNOWN
+Classifier: Programming Language :: Python :: 3
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Operating System :: OS Independent
+Requires-Python: >=3.6
+Description-Content-Type: text/markdown
